@@ -1,5 +1,6 @@
 // Program.cs
 using System;
+using System.IO;
 using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Text;
@@ -12,11 +13,13 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
-using BaseUsuarios.Api.Endpoints;
-using Microsoft.AspNetCore.Mvc;
-using System.Net.Mime;
-using BaseUsuarios.Api.Services.PdfHtml;  // ✅ solo una vez
+using Microsoft.OpenApi.Models;
 using MySql.Data.MySqlClient;
+
+using BaseUsuarios.Api.Endpoints;
+using BaseUsuarios.Api.Services.PdfHtml;  // IHtmlPdfService, ChromiumHtmlPdfService
+using BaseUsuarios.Api.Services.Pdf;     // IRegistrationPdfService, RegistrationPdfService
+using BaseUsuarios.Api.Services.Email;   // IEmailSender, MailKitEmailSender
 
 namespace BaseUsuarios.Api
 {
@@ -26,7 +29,7 @@ namespace BaseUsuarios.Api
         {
             var builder = WebApplication.CreateBuilder(args);
 
-            // === MySQL (como lo tienes) ===
+            // MySQL: usa "ComprasLocal" y si no, "Default"
             builder.Services.AddScoped<MySqlConnection>(sp =>
             {
                 var cfg = sp.GetRequiredService<IConfiguration>();
@@ -37,38 +40,41 @@ namespace BaseUsuarios.Api
             });
 
             builder.Services.AddControllers();
-            builder.Services.AddEndpointsApiExplorer();
-            builder.Services.AddSwaggerGen();
 
+            // Swagger / OpenAPI
+            builder.Services.AddEndpointsApiExplorer();
+            builder.Services.AddSwaggerGen(c =>
+            {
+                c.SwaggerDoc("v1", new OpenApiInfo
+                {
+                    Title = "BaseUsuarios API",
+                    Version = "v1",
+                    Description = "API del Proyecto Final (usuarios, carrito, pedidos, PDF, etc.)"
+                });
+            });
+
+            // SMTP options
             builder.Services.Configure<BaseUsuarios.Api.Config.SmtpOptions>(
                 builder.Configuration.GetSection("Smtp"));
 
-            builder.Services.AddSingleton<BaseUsuarios.Api.Services.Pdf.IRegistrationPdfService,
-                                          BaseUsuarios.Api.Services.Pdf.RegistrationPdfService>();
+            // PDF & Email
+            builder.Services.AddSingleton<IRegistrationPdfService, RegistrationPdfService>();
+            builder.Services.AddSingleton<IEmailSender, MailKitEmailSender>();
 
-            builder.Services.AddSingleton<BaseUsuarios.Api.Services.Email.IEmailSender,
-                                          BaseUsuarios.Api.Services.Email.MailKitEmailSender>();
-
-            // ✅ Implementación de PDF con Chromium
+            // HTML→PDF con Chromium
             builder.Services.AddSingleton<IHtmlPdfService, ChromiumHtmlPdfService>();
 
-            // ---- CORS para Vite (http://localhost:5173)
+            // CORS (ajusta orígenes si usas otro front)
             builder.Services.AddCors(o =>
             {
                 o.AddPolicy("dev", p => p
-                    .WithOrigins("http://localhost:5173", "http://127.0.0.1:5173")
+                    .WithOrigins("http://localhost:5173", "http://127.0.0.1:5173", "https://llaveros-umg-2.netlify.app")
                     .AllowAnyHeader()
                     .AllowAnyMethod()
                 );
             });
 
-            // Prepara wwwroot/uploads
-            var tempProvider = builder.Services.BuildServiceProvider();
-            var env0 = tempProvider.GetRequiredService<IWebHostEnvironment>();
-            var webRoot = env0.WebRootPath ?? Path.Combine(AppContext.BaseDirectory, "wwwroot");
-            Directory.CreateDirectory(Path.Combine(webRoot, "uploads"));
-
-            // ---- Config FaceSeg
+            // Config FaceSeg con defaults
             var faceCfg = builder.Configuration.GetSection("FaceSeg").Get<FaceSegConfig>()
                           ?? new FaceSegConfig
                           {
@@ -76,10 +82,9 @@ namespace BaseUsuarios.Api
                               Endpoint = "http://www.server.daossystem.pro:3406/api/Rostro/Segmentar",
                               TimeoutSeconds = 60
                           };
-
             builder.Services.AddSingleton(faceCfg);
 
-            // HttpClient para la API de Rostro (7s timeout recomendado)
+            // HttpClient FaceSeg
             builder.Services.AddHttpClient("faceVerify", c =>
             {
                 c.BaseAddress = new Uri("http://www.server.daossystem.pro:3406/");
@@ -89,39 +94,49 @@ namespace BaseUsuarios.Api
 
             var app = builder.Build();
 
-            // ======= ORDEN CORRECTO DE MIDDLEWARES =======
+            // Crear wwwroot/uploads (después de Build)
+            var webRoot = app.Environment.WebRootPath ?? Path.Combine(AppContext.BaseDirectory, "wwwroot");
+            Directory.CreateDirectory(Path.Combine(webRoot, "uploads"));
 
-            // 1) CORS primero (⬅️ cambio clave)
+            // Swagger en Dev y opcional en Prod con ENABLE_SWAGGER=true
+            if (app.Environment.IsDevelopment() ||
+                string.Equals(Environment.GetEnvironmentVariable("ENABLE_SWAGGER"), "true", StringComparison.OrdinalIgnoreCase))
+            {
+                app.UseSwagger();
+                app.UseSwaggerUI(c =>
+                {
+                    c.SwaggerEndpoint("/swagger/v1/swagger.json", "BaseUsuarios API v1");
+                    c.RoutePrefix = "swagger";
+                });
+            }
+
+            // CORS antes de estáticos/endpoints
             app.UseCors("dev");
 
-            // 2) Archivos estáticos con cabecera CORS para canvas (⬅️ cambio clave)
+            // Estáticos (CORS para <canvas> + cache)
             app.UseStaticFiles(new StaticFileOptions
             {
                 OnPrepareResponse = ctx =>
                 {
-                    // Permite que imágenes se usen en <canvas> desde el front (5173)
                     ctx.Context.Response.Headers["Access-Control-Allow-Origin"] = "*";
-                    // Cache razonable
                     ctx.Context.Response.Headers["Cache-Control"] = "public,max-age=31536000,immutable";
                 }
             });
 
-            // 3) Mapea endpoints (tu orden)
+            // Endpoints propios
             app.MapProductsEndpoints();
             app.MapCartEndpoints();
             app.MapPersonalizationEndpoints();
             app.MapPersonalizationUploadsEndpoints();
             app.MapUserPhotoEndpoints();
             app.MapOrdersEndpoints();
-            app.MapDeliveryEndpoints(); 
-            app.MapOrderHistoryEndpoints();  
+            app.MapDeliveryEndpoints();
+            app.MapOrderHistoryEndpoints();
 
-
-
-            // ---- Health simple
+            // Health
             app.MapGet("/api/ping", () => Results.Ok(new { ok = true, msg = "pong" }));
 
-            // ---- Preflight manual (util/segmentar-rostro)
+            // Preflight manual (FaceSeg)
             app.MapMethods("/api/util/segmentar-rostro", new[] { "OPTIONS" }, (HttpContext ctx) =>
             {
                 ctx.Response.Headers["Access-Control-Allow-Origin"] = ctx.Request.Headers["Origin"];
@@ -131,7 +146,7 @@ namespace BaseUsuarios.Api
                 return Results.Ok();
             });
 
-            // ============ PROXY NORMAL ============
+            // Proxy normal (FaceSeg)
             app.MapPost("/api/util/segmentar-rostro", async (
                 UtilSegmentRequest req,
                 IHttpClientFactory http,
@@ -158,7 +173,7 @@ namespace BaseUsuarios.Api
                 return Results.Ok(new { ok = false, segmentado = false, dataUrl = (string?)null, message = err ?? "Error FaceSeg" });
             });
 
-            // ============ VERBOSE (DEBUG) ============
+            // Proxy verbose (debug)
             app.MapPost("/api/util/segmentar-rostro-verbose", async (
                 UtilSegmentRequest req,
                 IHttpClientFactory http,
@@ -214,7 +229,7 @@ namespace BaseUsuarios.Api
         }
     }
 
-    // ===== DTOs / Config =====
+    // ===== DTOs / Config / Helper =====
     public record UtilSegmentRequest([property: JsonPropertyName("photoBase64")] string PhotoBase64);
 
     public record FaceSegResponse(
@@ -230,7 +245,6 @@ namespace BaseUsuarios.Api
         public int TimeoutSeconds { get; set; } = 60;
     }
 
-    // ===== Helper =====
     public static class FaceSegHelper
     {
         private static readonly JsonSerializerOptions UppercaseOptions = new JsonSerializerOptions

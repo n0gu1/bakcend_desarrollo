@@ -1,10 +1,62 @@
-# .NET build
+# =========================================
+# Archivos de build / binarios
+# =========================================
 bin/
 obj/
 *.dll
 *.exe
+*.pdb
+*.cache
+*.log
+*.tmp
+*.bak
 
-# Playwright y Chrome
+# =========================================
+# VS Code / Visual Studio / Rider
+# =========================================
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+*.DotSettings.user
+
+# =========================================
+# Sistema operativo
+# =========================================
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+.DS_Store
+
+# =========================================
+# Publicaciones y perfiles de deploy
+# =========================================
+publish/
+Properties/PublishProfiles/
+Properties/ServiceDependencies/
+*.json.user
+
+# =========================================
+# Git herramientas temporales
+# =========================================
+git-filter-repo
+nul
+
+# =========================================
+# Playwright / Puppeteer / Chromium
+# =========================================
 .playwright/
 Chrome/
 ChromeHeadlessShell/
+ms-playwright/
+
+# =========================================
+# Configuración de usuario
+# =========================================
+.config/
+*.env
+*.secret
