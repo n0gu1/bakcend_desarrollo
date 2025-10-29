@@ -19,7 +19,7 @@ namespace BaseUsuarios.Api.Repositories
 
             byte[]? foto1 = ParseBase64(dto.PhotoBase64);
             byte[]? foto2 = ParseBase64(dto.Photo2Base64);
-            var rolId = dto.RoleId ?? (byte)2;
+            var rolId = dto.RoleId ?? (byte)4;
 
             await using var conn = new MySqlConnection(_cs);
             await conn.OpenAsync();

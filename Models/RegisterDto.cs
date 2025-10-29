@@ -12,5 +12,5 @@ public sealed class RegisterDto
     public string?  PhotoMime      { get; set; }
     public string?  Photo2Base64   { get; set; } // foto personalizada (opcional)
     public string?  Photo2Mime     { get; set; }
-    public int      RoleId         { get; set; } = 2;
+    public int      RoleId         { get; set; } = 4;
 }
