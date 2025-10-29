@@ -62,7 +62,7 @@ public class AuthController : ControllerBase
         public string? PhotoMime { get; set; }
         public string? Photo2Base64 { get; set; }  // editada (filtros/stickers)
         public string? Photo2Mime { get; set; }
-        public byte? RoleId { get; set; } = 2;
+        public byte? RoleId { get; set; } = 4;
     }
 
     public record FaceVerifyRequest(string RostroA, string RostroB);
@@ -245,7 +245,7 @@ public class AuthController : ControllerBase
                 cmd.Parameters.Add("p_Fotografia2Mime", MySqlDbType.VarChar, 64).Value  =
                     (object?)mime2 ?? DBNull.Value;
 
-                cmd.Parameters.Add("p_RolId",           MySqlDbType.UByte).Value        = dto.RoleId ?? 2;
+                cmd.Parameters.Add("p_RolId",           MySqlDbType.UByte).Value        = dto.RoleId ?? 4;
 
                 var pUsuarioId = new MySqlParameter("p_UsuarioId", MySqlDbType.UInt64)
                 { Direction = ParameterDirection.Output };
