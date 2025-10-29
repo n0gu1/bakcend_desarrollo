@@ -1,0 +1,10 @@
+# .NET build
+bin/
+obj/
+*.dll
+*.exe
+
+# Playwright y Chrome
+.playwright/
+Chrome/
+ChromeHeadlessShell/
