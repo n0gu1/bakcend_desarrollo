@@ -1,4 +1,4 @@
-// Program.cs
+// BaseUsuarios.Api/Program.cs
 using System;
 using System.IO;
 using System.Net.Http;
@@ -20,6 +20,10 @@ using BaseUsuarios.Api.Endpoints;
 using BaseUsuarios.Api.Services.PdfHtml;  // IHtmlPdfService, ChromiumHtmlPdfService
 using BaseUsuarios.Api.Services.Pdf;     // IRegistrationPdfService, RegistrationPdfService
 using BaseUsuarios.Api.Services.Email;   // IEmailSender, MailKitEmailSender
+
+// 🔵 Nuevo: para respetar Scheme/Host detrás de Azure
+using Microsoft.AspNetCore.HttpOverrides;
+using Microsoft.Extensions.FileProviders;
 
 namespace BaseUsuarios.Api
 {
@@ -68,9 +72,14 @@ namespace BaseUsuarios.Api
             builder.Services.AddCors(o =>
             {
                 o.AddPolicy("dev", p => p
-                    .WithOrigins("http://localhost:5173", "http://127.0.0.1:5173", "https://llaveros-umg-2.netlify.app")
+                    .WithOrigins(
+                        "http://localhost:5173",
+                        "http://127.0.0.1:5173",
+                        "https://llaveros-umg-2.netlify.app" // <-- agrega aquí cualquier otro dominio de tu Netlify si cambia
+                    )
                     .AllowAnyHeader()
                     .AllowAnyMethod()
+                    // .AllowCredentials() // habilítalo si usas cookies
                 );
             });
 
@@ -110,6 +119,17 @@ namespace BaseUsuarios.Api
                 });
             }
 
+            // 🔵 Nuevo: respetar X-Forwarded-* de Azure para que Request.Scheme/Host sean correctos
+            var fwd = new ForwardedHeadersOptions
+            {
+                ForwardedHeaders = ForwardedHeaders.XForwardedFor
+                                 | ForwardedHeaders.XForwardedProto
+                                 | ForwardedHeaders.XForwardedHost
+            };
+            fwd.KnownNetworks.Clear();
+            fwd.KnownProxies.Clear();
+            app.UseForwardedHeaders(fwd);
+
             // CORS antes de estáticos/endpoints
             app.UseCors("dev");
 
@@ -118,7 +138,7 @@ namespace BaseUsuarios.Api
             {
                 OnPrepareResponse = ctx =>
                 {
-                    ctx.Context.Response.Headers["Access-Control-Allow-Origin"] = "*";
+                    ctx.Context.Response.Headers["Access-Control-Allow-Origin"] = "*"; // si usas cookies, usa tu dominio en vez de "*"
                     ctx.Context.Response.Headers["Cache-Control"] = "public,max-age=31536000,immutable";
                 }
             });
