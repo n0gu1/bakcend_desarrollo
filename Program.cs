@@ -15,6 +15,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.OpenApi.Models;
 using MySql.Data.MySqlClient;
+using Api.Endpoints;
 
 using BaseUsuarios.Api.Endpoints;
 using BaseUsuarios.Api.Services.PdfHtml;  // IHtmlPdfService, ChromiumHtmlPdfService
@@ -152,6 +153,7 @@ namespace BaseUsuarios.Api
             app.MapOrdersEndpoints();
             app.MapDeliveryEndpoints();
             app.MapOrderHistoryEndpoints();
+            app.MapOperadorEndpoints();
 
             // Health
             app.MapGet("/api/ping", () => Results.Ok(new { ok = true, msg = "pong" }));
