@@ -30,13 +30,15 @@ public static class OperadorEndpoints
         => cfg.GetConnectionString("Default");
 
     /* ================= DTOs ================= */
+    // ⚠️ Incluimos 'id' para que el front pueda hidratar imágenes por orden
     public record OperatorCardDto(
-        string folio,         // folio de la orden
-        string customerName,  // Nickname (o Email)
-        string nfcType,       // "Link"
-        string? nfcData,      // o.qr_texto
-        string? imageA,       // /uploads/...
-        string? imageB        // /uploads/...
+        long id,            // <<--- NUEVO (orden_id)
+        string folio,       // folio de la orden
+        string customerName,// Nickname (o Email)
+        string nfcType,     // "Link"
+        string? nfcData,    // o.qr_texto
+        string? imageA,     // /uploads/... o data:image/...
+        string? imageB      // /uploads/... o data:image/...
     );
 
     /* ================= GET Orders =================
@@ -85,23 +87,27 @@ WHERE oi.orden_id = @ordenId;";
             var userName = await GetUserDisplayNameAsync(cfg, (long)o.usuario_id)
                            ?? $"Cliente #{o.usuario_id}";
 
+            // 3.1 Fallback de imágenes por orden en imagenes_b64 (último par)
+            var (b64A, b64B) = await GetB64PairByOrderAsync(db, (long)o.id);
+
             foreach (var it in items)
             {
-                // Primera imagen 'foto' de cada lado
-                var imageA = await GetFirstPhotoAsync(db, (long?)it.pAId);
-                var imageB = await GetFirstPhotoAsync(db, (long?)it.pBId);
+                // Primera imagen 'foto' de cada lado desde personalización (si existe)
+                var imgAUploads = await GetFirstPhotoAsync(db, (long?)it.pAId);
+                var imgBUploads = await GetFirstPhotoAsync(db, (long?)it.pBId);
 
-                // NFC/QR
-                var nfcType = "Link";
-                string? nfcData = (string?)o.qr_texto;
+                // Preferimos /uploads si existen; si no, caemos a base64 por orden
+                var imageA = !string.IsNullOrWhiteSpace(imgAUploads) ? imgAUploads : b64A;
+                var imageB = !string.IsNullOrWhiteSpace(imgBUploads) ? imgBUploads : b64B;
 
                 string folio = Convert.ToString(o.folio) ?? ((long)o.id).ToString();
 
                 cards.Add(new OperatorCardDto(
+                    id: (long)o.id,                    // <<--- enviamos id
                     folio: folio,
                     customerName: userName,
-                    nfcType: nfcType,
-                    nfcData: nfcData,
+                    nfcType: "Link",
+                    nfcData: (string?)o.qr_texto,
                     imageA: imageA,
                     imageB: imageB
                 ));
@@ -127,11 +133,24 @@ LIMIT 1;";
         return ruta.StartsWith("/") ? ruta : "/" + ruta;
     }
 
-    /* ========== Helper: display name del usuario ==========
-       1) INTENTA SELECT directo a tabla `usuarios`:
-            name = COALESCE(NULLIF(TRIM(Nickname),''), NULLIF(TRIM(Email), ''))
-       2) Si falla por permisos, intenta el SP: CALL sp_usuarios_obtener_por_id(@id)
-    */
+    /* ========== Helper: último par base64 por orden (imagenes_b64) ========== */
+    static async Task<(string? A, string? B)> GetB64PairByOrderAsync(IDbConnection db, long ordenId)
+    {
+        const string sql = @"
+SELECT ladoA_b64 AS A, ladoB_b64 AS B
+FROM imagenes_b64
+WHERE orden_id = @ordenId
+ORDER BY id DESC
+LIMIT 1;";
+        var row = await db.QueryFirstOrDefaultAsync(sql, new { ordenId });
+        if (row == null) return (null, null);
+        // row.A / row.B son dinámicos; Dapper los expone como object
+        string? a = (row.A as string);
+        string? b = (row.B as string);
+        return (a, b);
+    }
+
+    /* ========== Helper: display name del usuario ========== */
     static async Task<string?> GetUserDisplayNameAsync(IConfiguration cfg, long userId)
     {
         var cs = GetConnUsuarios(cfg);
@@ -153,16 +172,12 @@ LIMIT 1;";
             var name = await db.ExecuteScalarAsync<string?>(sql, new { id = userId });
             if (!string.IsNullOrWhiteSpace(name)) return name!.Trim();
         }
-        catch
-        {
-            // sigue al SP
-        }
+        catch { /* sigue al SP */ }
 
         // 2) SP de respaldo
         try
         {
             await using var db2 = new MySqlConnection(cs);
-            // El SP devuelve 1 fila con columnas (UsuarioId, Email, Telefono, FechaNacimiento, Nickname, PasswordHash, RolId, EstaActivo)
             var row = await db2.QueryFirstOrDefaultAsync<dynamic>(
                 "CALL sp_usuarios_obtener_por_id(@uid);", new { uid = userId });
 
@@ -176,10 +191,7 @@ LIMIT 1;";
                 if (!string.IsNullOrWhiteSpace(name)) return name;
             }
         }
-        catch
-        {
-            // ignora -> caerá a null
-        }
+        catch { /* ignora */ }
 
         return null;
     }

@@ -76,11 +76,10 @@ namespace BaseUsuarios.Api
                     .WithOrigins(
                         "http://localhost:5173",
                         "http://127.0.0.1:5173",
-                        "https://llaveros-umg-2.netlify.app" // <-- agrega aquí cualquier otro dominio de tu Netlify si cambia
+                        "https://llaveros-umg-2.netlify.app" // agrega aquí otros dominios del front si cambian
                     )
                     .AllowAnyHeader()
                     .AllowAnyMethod()
-                    // .AllowCredentials() // habilítalo si usas cookies
                 );
             });
 
@@ -120,7 +119,7 @@ namespace BaseUsuarios.Api
                 });
             }
 
-            // 🔵 Nuevo: respetar X-Forwarded-* de Azure para que Request.Scheme/Host sean correctos
+            // 🔵 Respetar X-Forwarded-* de Azure para Scheme/Host correctos
             var fwd = new ForwardedHeadersOptions
             {
                 ForwardedHeaders = ForwardedHeaders.XForwardedFor
@@ -154,6 +153,16 @@ namespace BaseUsuarios.Api
             app.MapDeliveryEndpoints();
             app.MapOrderHistoryEndpoints();
             app.MapOperadorEndpoints();
+            app.MapOrdenesImagesEndpoints();  // <<--- NUEVO
+            app.MapShopImagesDirectEndpoints();   // <= NUEVO
+            app.MapOrderImagesDirectEndpoints();
+            app.MapSimpleB64Endpoints();
+
+
+
+
+            // 🔵 Mantén la extensión — aquí se mapean /images-b64
+            app.MapOrderImagesB64Endpoints();
 
             // Health
             app.MapGet("/api/ping", () => Results.Ok(new { ok = true, msg = "pong" }));

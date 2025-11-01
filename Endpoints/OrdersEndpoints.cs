@@ -1,5 +1,9 @@
 // BaseUsuarios.Api/Endpoints/OrdersEndpoints.cs
+using System;
+using System.Collections.Generic;
 using System.Data;
+using System.Linq;
+using System.Threading.Tasks;
 using Dapper;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
@@ -22,7 +26,8 @@ public static class OrdersEndpoints
     public record CheckoutReq(
         long usuarioId,
         string metodoPago,            // "efectivo" | "tarjeta"
-        CheckoutAddressReq? direccion // opcional
+        CheckoutAddressReq? direccion, // opcional
+        long? draftItemId              // id borrador (localStorage) para fallback de personalizaciones
     );
 
     public record CheckoutResp(
@@ -217,8 +222,17 @@ public static class OrdersEndpoints
                     SELECT LAST_INSERT_ID();",
                     new { o = ordenId, p = productoId, c = cantidad, pu = precio }, tx);
 
-                await CopiarPersonalizacionesAsync(db, tx, (long)it.id, oiId);
+                // Copiar personalizaciones (con fallback a draftItemId) y obtener pids A/B
+                var (pidA, pidB) = await CopiarPersonalizacionesAsync(db, tx, (long)it.id, oiId, body.draftItemId);
 
+                // Guardar imagen destacada A/B en orden_imagenes
+                if (pidA.HasValue)
+                    await UpsertOrdenImagenAsync(db, tx, ordenId, pidA.Value, 'A');
+
+                if (pidB.HasValue)
+                    await UpsertOrdenImagenAsync(db, tx, ordenId, pidB.Value, 'B');
+
+                // Crear entrega + historial base
                 long entregaId = await db.ExecuteScalarAsync<long>(@"
                     INSERT INTO entregas (orden_id, estado)
                     VALUES (@o, 'pendiente');
@@ -381,10 +395,11 @@ public static class OrdersEndpoints
                     VALUES (@en, @es, NULL, NULL, NOW());",
                     new { en = entregaId, es = (long)ord.estado_actual_id }, tx);
 
-                // historial (registramos nota; para cumplir NOT NULL de transicion_id
-                // usamos una autotransición desde y hacia el mismo estado)
+                // historial (autotransición)
                 long trId = await AsegurarTransicionAsync(
-                    db, tx, procesoId: await db.ExecuteScalarAsync<long>("SELECT proceso_id FROM ordenes WHERE id=@id;", new { id = (long)ord.id }, tx),
+                    db, tx,
+                    procesoId: await db.ExecuteScalarAsync<long>(
+                        "SELECT proceso_id FROM ordenes WHERE id=@id;", new { id = (long)ord.id }, tx),
                     estadoDesdeId: (long)ord.estado_actual_id,
                     estadoHastaId: (long)ord.estado_actual_id);
 
@@ -433,7 +448,14 @@ public static class OrdersEndpoints
         return id;
     }
 
-    private static async Task CopiarPersonalizacionesAsync(IDbConnection db, IDbTransaction tx, long fromCarritoItemId, long toOrdenItemId)
+    /// <summary>
+    /// Copia personalizaciones del carrito al ítem de orden.
+    /// Si no hay personalizaciones para el carrito_item real, intenta con un draftId (borrador de localStorage).
+    /// Asigna orden_items.personalizacion_ladoA_id / personalizacion_ladoB_id y devuelve esos IDs.
+    /// </summary>
+    private static async Task<(long? pidA, long? pidB)> CopiarPersonalizacionesAsync(
+        IDbConnection db, IDbTransaction tx,
+        long fromCarritoItemId, long toOrdenItemId, long? fallbackDraftItemId = null)
     {
         var pers = (await db.QueryAsync<(long id, string lado)>(@"
             SELECT id, lado
@@ -441,26 +463,103 @@ public static class OrdersEndpoints
             WHERE propietario_tipo='carrito_item' AND propietario_id=@cid",
             new { cid = fromCarritoItemId }, tx)).ToList();
 
-        if (pers.Count == 0) return;
-
-        foreach (var (pid, _) in pers)
+        // Fallback: si el front guardó con un draftId (ej. timestamp local)
+        if (pers.Count == 0 && fallbackDraftItemId.HasValue)
         {
-            long newPid = await db.ExecuteScalarAsync<long>(@"
-                INSERT INTO personalizaciones (propietario_tipo, propietario_id, lado, captura)
-                SELECT 'orden_item', @oi, lado, captura
-                FROM personalizaciones WHERE id=@pid;
-                SELECT LAST_INSERT_ID();",
-                new { oi = toOrdenItemId, pid }, tx);
+            pers = (await db.QueryAsync<(long id, string lado)>(@"
+                SELECT id, lado
+                FROM personalizaciones
+                WHERE propietario_tipo='carrito_item' AND propietario_id=@draftId",
+                new { draftId = fallbackDraftItemId.Value }, tx)).ToList();
+        }
+
+        if (pers.Count > 0)
+        {
+            foreach (var (pid, _) in pers)
+            {
+                long newPid = await db.ExecuteScalarAsync<long>(@"
+                    INSERT INTO personalizaciones (propietario_tipo, propietario_id, lado, captura)
+                    SELECT 'orden_item', @oi, lado, captura
+                    FROM personalizaciones WHERE id=@pid;
+                    SELECT LAST_INSERT_ID();",
+                    new { oi = toOrdenItemId, pid }, tx);
+
+                await db.ExecuteAsync(@"
+                    INSERT INTO personalizacion_capas
+                    (personalizacion_id, tipo_capa, z_index, pos_x, pos_y, escala, rotacion, texto, fuente, color,
+                     archivo_id, sticker_id, filtro_id, datos)
+                    SELECT @nuevo, tipo_capa, z_index, pos_x, pos_y, escala, rotacion, texto, fuente, color,
+                           archivo_id, sticker_id, filtro_id, datos
+                    FROM personalizacion_capas
+                    WHERE personalizacion_id=@old;",
+                    new { nuevo = newPid, old = pid }, tx);
+            }
+
+            // Asignar referencias a A/B en orden_items
+            var lados = (await db.QueryAsync<(long id, string lado)>(@"
+                SELECT id, lado
+                FROM personalizaciones
+                WHERE propietario_tipo='orden_item' AND propietario_id=@oi;",
+                new { oi = toOrdenItemId }, tx)).ToList();
+
+            long? pidA = lados.Where(x => string.Equals(x.lado, "A", StringComparison.OrdinalIgnoreCase))
+                              .Select(x => (long?)x.id)
+                              .FirstOrDefault();
+
+            long? pidB = lados.Where(x => string.Equals(x.lado, "B", StringComparison.OrdinalIgnoreCase))
+                              .Select(x => (long?)x.id)
+                              .FirstOrDefault();
 
             await db.ExecuteAsync(@"
-                INSERT INTO personalizacion_capas
-                (personalizacion_id, tipo_capa, z_index, pos_x, pos_y, escala, rotacion, texto, fuente, color,
-                 archivo_id, sticker_id, filtro_id, datos)
-                SELECT @nuevo, tipo_capa, z_index, pos_x, pos_y, escala, rotacion, texto, fuente, color,
-                       archivo_id, sticker_id, filtro_id, datos
-                FROM personalizacion_capas
-                WHERE personalizacion_id=@old;",
-                new { nuevo = newPid, old = pid }, tx);
+                UPDATE orden_items
+                SET personalizacion_ladoA_id = @pa,
+                    personalizacion_ladoB_id = @pb
+                WHERE id=@oi;",
+                new { pa = (object?)pidA ?? DBNull.Value, pb = (object?)pidB ?? DBNull.Value, oi = toOrdenItemId }, tx);
+
+            return (pidA, pidB);
         }
+
+        // No hubo personalizaciones
+        return (null, null);
+    }
+
+    /// <summary>
+    /// Selecciona el archivo_id de la capa FOTO "top" para una personalización dada
+    /// y hace UPSERT en orden_imagenes (por lado).
+    /// Además, marca el archivo como propietario de la orden.
+    /// </summary>
+    private static async Task UpsertOrdenImagenAsync(
+        IDbConnection db, IDbTransaction tx,
+        long ordenId, long personalizacionId, char lado)
+    {
+        var archivoId = await db.ExecuteScalarAsync<long?>(@"
+            SELECT pc.archivo_id
+            FROM personalizacion_capas pc
+            WHERE pc.personalizacion_id=@pid
+              AND pc.tipo_capa='foto'
+              AND pc.archivo_id IS NOT NULL
+            ORDER BY COALESCE(pc.z_index,0) DESC, pc.id DESC
+            LIMIT 1;",
+            new { pid = personalizacionId }, tx);
+
+        if (!archivoId.HasValue) return;
+
+        // UPSERT en orden_imagenes
+        await db.ExecuteAsync(@"
+            INSERT INTO orden_imagenes (orden_id, archivo_id, lado)
+            VALUES (@o, @a, @lado)
+            ON DUPLICATE KEY UPDATE
+              archivo_id = VALUES(archivo_id),
+              creado_en  = CURRENT_TIMESTAMP;",
+            new { o = ordenId, a = archivoId.Value, lado = (lado == 'B' ? "B" : "A") }, tx);
+
+        // (Opcional) actualizar propiedad del archivo hacia la orden
+        await db.ExecuteAsync(@"
+            UPDATE archivos
+            SET propietario_tipo='orden', propietario_id=@o
+            WHERE id=@a
+              AND (propietario_tipo IS NULL OR propietario_tipo='personalizacion');",
+            new { o = ordenId, a = archivoId.Value }, tx);
     }
 }
