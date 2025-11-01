@@ -15,7 +15,7 @@ public static class OperadorEndpoints
         // GET /api/operator/orders?estado=CRE&limit=50
         g.MapGet("/orders", GetOrders);
 
-        // POST /api/operator/orders/{orderId}/advance   body: { to: "PROC", note?: string }
+        // POST /api/operator/orders/{orderId}/advance   body: { to: "PROC" | "READY", note?: string }
         g.MapPost("/orders/{orderId:long}/advance", AdvanceOrder);
 
         return app;
@@ -30,19 +30,19 @@ public static class OperadorEndpoints
         => cfg.GetConnectionString("Default");
 
     /* ================= DTOs ================= */
-    // ⚠️ Incluimos 'id' para que el front pueda hidratar imágenes por orden
+    // Incluimos 'id' (orden_id) para que el front pueda hidratar por orderId
     public record OperatorCardDto(
-        long id,            // <<--- NUEVO (orden_id)
-        string folio,       // folio de la orden
-        string customerName,// Nickname (o Email)
-        string nfcType,     // "Link"
-        string? nfcData,    // o.qr_texto
-        string? imageA,     // /uploads/... o data:image/...
-        string? imageB      // /uploads/... o data:image/...
+        long id,
+        string folio,
+        string customerName,
+        string nfcType,
+        string? nfcData,
+        string? imageA,
+        string? imageB
     );
 
     /* ================= GET Orders =================
-       Devuelve una “lista aplanada”: 1 tarjeta por cada item de la orden
+       Devuelve una lista aplanada: 1 tarjeta por cada item de la orden
     */
     static async Task<IResult> GetOrders(
         [FromServices] IConfiguration cfg,
@@ -54,7 +54,6 @@ public static class OperadorEndpoints
         p.Add("@estado", estado);
         p.Add("@limit", limit);
 
-        // 1) Ordenes por estado
         const string sqlOrders = @"
 SELECT o.id, o.folio, o.usuario_id, o.qr_texto, o.creado_en
 FROM ordenes o
@@ -68,7 +67,7 @@ LIMIT @limit;";
 
         foreach (var o in orders)
         {
-            // 2) Items de la orden
+            // Items por orden
             const string sqlItems = @"
 SELECT 
   oi.id           AS orden_item_id,
@@ -83,27 +82,26 @@ JOIN productos p ON p.id = oi.producto_id
 WHERE oi.orden_id = @ordenId;";
             var items = await db.QueryAsync(sqlItems, new { ordenId = (long)o.id });
 
-            // 3) Nombre del usuario desde la BD de usuarios (Default)
+            // DisplayName de usuario (Default)
             var userName = await GetUserDisplayNameAsync(cfg, (long)o.usuario_id)
                            ?? $"Cliente #{o.usuario_id}";
 
-            // 3.1 Fallback de imágenes por orden en imagenes_b64 (último par)
+            // Fallback base64 por orden (último par)
             var (b64A, b64B) = await GetB64PairByOrderAsync(db, (long)o.id);
 
             foreach (var it in items)
             {
-                // Primera imagen 'foto' de cada lado desde personalización (si existe)
+                // Primera capa 'foto' por lado desde personalización
                 var imgAUploads = await GetFirstPhotoAsync(db, (long?)it.pAId);
                 var imgBUploads = await GetFirstPhotoAsync(db, (long?)it.pBId);
 
-                // Preferimos /uploads si existen; si no, caemos a base64 por orden
                 var imageA = !string.IsNullOrWhiteSpace(imgAUploads) ? imgAUploads : b64A;
                 var imageB = !string.IsNullOrWhiteSpace(imgBUploads) ? imgBUploads : b64B;
 
                 string folio = Convert.ToString(o.folio) ?? ((long)o.id).ToString();
 
                 cards.Add(new OperatorCardDto(
-                    id: (long)o.id,                    // <<--- enviamos id
+                    id: (long)o.id,
                     folio: folio,
                     customerName: userName,
                     nfcType: "Link",
@@ -144,7 +142,7 @@ ORDER BY id DESC
 LIMIT 1;";
         var row = await db.QueryFirstOrDefaultAsync(sql, new { ordenId });
         if (row == null) return (null, null);
-        // row.A / row.B son dinámicos; Dapper los expone como object
+
         string? a = (row.A as string);
         string? b = (row.B as string);
         return (a, b);
