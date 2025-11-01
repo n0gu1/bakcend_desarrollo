@@ -3,6 +3,7 @@ using Dapper;
 using Microsoft.AspNetCore.Mvc;
 using MySql.Data.MySqlClient;
 using System.Data;
+using System.Linq;
 
 namespace Api.Endpoints;
 
@@ -43,6 +44,7 @@ public static class OperadorEndpoints
 
     /* ================= GET Orders =================
        Devuelve una lista aplanada: 1 tarjeta por cada item de la orden
+       >>> CAMBIO: nfcData prioriza imagenes_b64.url_general (si existe), si no, usa ordenes.qr_texto
     */
     static async Task<IResult> GetOrders(
         [FromServices] IConfiguration cfg,
@@ -89,6 +91,12 @@ WHERE oi.orden_id = @ordenId;";
             // Fallback base64 por orden (último par)
             var (b64A, b64B) = await GetB64PairByOrderAsync(db, (long)o.id);
 
+            // >>> CAMBIO: obtener url_general si existe para esta orden
+            var urlGeneral = await GetUrlGeneralByOrderAsync(db, (long)o.id);
+            var nfcDataFinal = !string.IsNullOrWhiteSpace(urlGeneral)
+                ? urlGeneral
+                : (string?)o.qr_texto;
+
             foreach (var it in items)
             {
                 // Primera capa 'foto' por lado desde personalización
@@ -105,7 +113,7 @@ WHERE oi.orden_id = @ordenId;";
                     folio: folio,
                     customerName: userName,
                     nfcType: "Link",
-                    nfcData: (string?)o.qr_texto,
+                    nfcData: nfcDataFinal, // <<< se mostrará en “Datos” de Programar NFC
                     imageA: imageA,
                     imageB: imageB
                 ));
@@ -146,6 +154,19 @@ LIMIT 1;";
         string? a = (row.A as string);
         string? b = (row.B as string);
         return (a, b);
+    }
+
+    /* ========== Helper: url_general por orden (imagenes_b64) ========== */
+    static async Task<string?> GetUrlGeneralByOrderAsync(IDbConnection db, long ordenId)
+    {
+        // Requiere columna imagenes_b64.url_general
+        const string sql = @"
+SELECT url_general
+FROM imagenes_b64
+WHERE orden_id = @ordenId AND COALESCE(TRIM(url_general),'') <> ''
+ORDER BY id DESC
+LIMIT 1;";
+        return await db.ExecuteScalarAsync<string?>(sql, new { ordenId });
     }
 
     /* ========== Helper: display name del usuario ========== */
