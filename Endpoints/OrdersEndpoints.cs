@@ -14,47 +14,17 @@ namespace BaseUsuarios.Api.Endpoints;
 
 public static class OrdersEndpoints
 {
-    // ====== DTOs ======
-    public record CheckoutAddressReq(
-        string? descripcion,
-        string? contactoNombre,
-        string? telefono,
-        long? areaId,
-        long? puntoEntregaId
-    );
-
-    public record CheckoutReq(
-        long usuarioId,
-        string metodoPago,            // "efectivo" | "tarjeta"
-        CheckoutAddressReq? direccion, // opcional
-        long? draftItemId              // id borrador (localStorage) para fallback de personalizaciones
-    );
-
-    public record CheckoutResp(
-        string scope, // "local" o "default"
-        long usuarioId,
-        int itemsProcesados,
-        List<OrdenCreada> ordenes
-    );
-
-    public record OrdenCreada(
-        long ordenId,
-        string folio,
-        decimal total,
-        long? entregaId
-    );
-
-    // set-state acepta code|codigo y note|notas
+    public record CheckoutAddressReq(string? descripcion, string? contactoNombre, string? telefono, long? areaId, long? puntoEntregaId);
+    public record CheckoutReq(long usuarioId, string metodoPago, CheckoutAddressReq? direccion, long? draftItemId);
+    public record CheckoutResp(string scope, long usuarioId, int itemsProcesados, List<OrdenCreada> ordenes);
+    public record OrdenCreada(long ordenId, string folio, decimal total, long? entregaId);
     public record SetStateReq(string? code, string? codigo, string? note, string? notas);
-
-    // evento manual acepta note|notas
     public record AddEventReq(string? note, string? notas);
 
     public static void MapOrdersEndpoints(this IEndpointRouteBuilder app)
     {
         var g = app.MapGroup("/api");
 
-        // Helper conexión
         static IDbConnection OpenConn(HttpContext ctx, bool local)
         {
             var cfg = ctx.RequestServices.GetRequiredService<IConfiguration>();
@@ -64,7 +34,6 @@ public static class OrdersEndpoints
             return conn;
         }
 
-        // ================== ÁREAS / PUNTOS / PREVIEW ==================
         g.MapGet("/{scope:regex((?i)^(local|default)$)}/areas", async (HttpContext ctx, string scope) =>
         {
             var local = scope.Equals("local", StringComparison.OrdinalIgnoreCase);
@@ -112,7 +81,6 @@ public static class OrdersEndpoints
             return Results.Ok(new { items, total });
         });
 
-        // ================== CHECKOUT ==================
         g.MapPost("/{scope:regex((?i)^(local|default)$)}/checkout", async (HttpContext ctx, string scope, CheckoutReq body) =>
         {
             if (body.usuarioId <= 0) return Results.BadRequest(new { error = "usuarioId inválido" });
@@ -145,7 +113,6 @@ public static class OrdersEndpoints
             if (items.Count == 0)
                 return Results.BadRequest(new { error = "El carrito está vacío." });
 
-            // Dirección (opcional)
             long? direccionId = null;
             long? areaId = body.direccion?.areaId;
             long? puntoId = body.direccion?.puntoEntregaId;
@@ -166,7 +133,6 @@ public static class OrdersEndpoints
                     }, tx);
             }
 
-            // Proceso / estado inicial
             var proceso = await db.QueryFirstOrDefaultAsync(
                 "SELECT id FROM procesos WHERE codigo='ORD' LIMIT 1;", transaction: tx);
             if (proceso is null)
@@ -182,7 +148,6 @@ public static class OrdersEndpoints
 
             long estadoInicialId = (long)estadoInicial.id;
 
-            // Crear órdenes (1 por ítem)
             var ordenes = new List<OrdenCreada>();
             foreach (var it in items)
             {
@@ -222,23 +187,18 @@ public static class OrdersEndpoints
                     SELECT LAST_INSERT_ID();",
                     new { o = ordenId, p = productoId, c = cantidad, pu = precio }, tx);
 
-                // Copiar personalizaciones (con fallback a draftItemId) y obtener pids A/B
                 var (pidA, pidB) = await CopiarPersonalizacionesAsync(db, tx, (long)it.id, oiId, body.draftItemId);
 
-                // Guardar imagen destacada A/B en orden_imagenes
-                if (pidA.HasValue)
-                    await UpsertOrdenImagenAsync(db, tx, ordenId, pidA.Value, 'A');
+                if (pidA.HasValue) await UpsertOrdenImagenAsync(db, tx, ordenId, pidA.Value, 'A');
+                if (pidB.HasValue) await UpsertOrdenImagenAsync(db, tx, ordenId, pidB.Value, 'B');
 
-                if (pidB.HasValue)
-                    await UpsertOrdenImagenAsync(db, tx, ordenId, pidB.Value, 'B');
-
-                // Crear entrega + historial base
                 long entregaId = await db.ExecuteScalarAsync<long>(@"
                     INSERT INTO entregas (orden_id, estado)
                     VALUES (@o, 'pendiente');
                     SELECT LAST_INSERT_ID();", new { o = ordenId }, tx);
 
                 long trId = await AsegurarTransicionAsync(db, tx, procesoId, estadoInicialId, estadoInicialId);
+
                 await db.ExecuteAsync(@"
                     INSERT INTO historial_flujo (objeto_tipo, objeto_id, transicion_id, estado_id, usuario_id, notas, creado_en)
                     VALUES ('orden', @id, @tr, @st, @u, 'Creación de orden', NOW());",
@@ -254,7 +214,6 @@ public static class OrdersEndpoints
             return Results.Ok(new CheckoutResp(local ? "local" : "default", body.usuarioId, items.Count, ordenes));
         });
 
-        // ================== TRACKING (GET) ==================
         static async Task<IResult> TrackingHandler(HttpContext ctx, bool local, string folio)
         {
             using var db = OpenConn(ctx, local);
@@ -299,7 +258,6 @@ public static class OrdersEndpoints
                 return TrackingHandler(ctx, local, folio);
             });
 
-        // ================== SET STATE (POST) ==================
         g.MapPost("/{scope:regex((?i)^(local|default)$)}/orders/{folio}/set-state",
             async (HttpContext ctx, string scope, string folio, SetStateReq body) =>
             {
@@ -329,17 +287,13 @@ public static class OrdersEndpoints
                     LIMIT 1;", new { p = (long)ord.proceso_id, c = code }, tx);
                 if (estadoHasta is null) return Results.BadRequest(new { error = "Estado destino inválido" });
 
-                // transición (obligatoria porque historial_flujo.transicion_id es NOT NULL)
-                long transicionId = await AsegurarTransicionAsync(
-                    db, tx, (long)ord.proceso_id, estadoDesdeId, (long)estadoHasta.id);
+                long transicionId = await AsegurarTransicionAsync(db, tx, (long)ord.proceso_id, estadoDesdeId, (long)estadoHasta.id);
 
-                // actualizar orden
                 await db.ExecuteAsync(@"
                     UPDATE ordenes
                     SET estado_actual_id=@e, actualizado_en=NOW()
                     WHERE id=@o;", new { e = (long)estadoHasta.id, o = (long)ord.id }, tx);
 
-                // asegurar entrega
                 var entrega = await db.QueryFirstOrDefaultAsync(
                     "SELECT id FROM entregas WHERE orden_id=@o LIMIT 1;",
                     new { o = (long)ord.id }, tx);
@@ -347,13 +301,11 @@ public static class OrdersEndpoints
                     INSERT INTO entregas (orden_id, estado) VALUES (@o, 'pendiente');
                     SELECT LAST_INSERT_ID();", new { o = (long)ord.id }, tx);
 
-                // evento de entrega (estado_id NOT NULL, creado_en)
                 await db.ExecuteAsync(@"
                     INSERT INTO entrega_eventos (entrega_id, estado_id, lat, lng, creado_en)
                     VALUES (@en, @es, NULL, NULL, NOW());",
                     new { en = entregaId, es = (long)estadoHasta.id }, tx);
 
-                // historial con transicion_id válido
                 await db.ExecuteAsync(@"
                     INSERT INTO historial_flujo (objeto_tipo, objeto_id, transicion_id, estado_id, usuario_id, notas, creado_en)
                     VALUES ('orden', @id, @tr, @st, @u, @n, NOW());",
@@ -369,7 +321,6 @@ public static class OrdersEndpoints
                 return Results.Ok(new { ok = true });
             });
 
-        // ================== CREAR EVENTO MANUAL (POST) ==================
         g.MapPost("/{scope:regex((?i)^(local|default)$)}/orders/{folio}/events",
             async (HttpContext ctx, string scope, string folio, AddEventReq body) =>
             {
@@ -389,13 +340,11 @@ public static class OrdersEndpoints
                     INSERT INTO entregas (orden_id, estado) VALUES (@o, 'pendiente');
                     SELECT LAST_INSERT_ID();", new { o = (long)ord.id }, tx);
 
-                // usamos el estado ACTUAL de la orden (NOT NULL)
                 await db.ExecuteAsync(@"
                     INSERT INTO entrega_eventos (entrega_id, estado_id, lat, lng, creado_en)
                     VALUES (@en, @es, NULL, NULL, NOW());",
                     new { en = entregaId, es = (long)ord.estado_actual_id }, tx);
 
-                // historial (autotransición)
                 long trId = await AsegurarTransicionAsync(
                     db, tx,
                     procesoId: await db.ExecuteScalarAsync<long>(
@@ -413,23 +362,17 @@ public static class OrdersEndpoints
             });
     }
 
-    // ===================== helpers =====================
     private static async Task<string> NuevoFolioAsync(IDbConnection db, IDbTransaction tx)
     {
         var s = DateTime.UtcNow.ToString("yyyyMMdd");
         var rnd = Random.Shared.Next(1000, 9999);
         string folio = $"{s}-{rnd}";
-        var exists = await db.ExecuteScalarAsync<int>(
-            "SELECT COUNT(*) FROM ordenes WHERE folio=@f;", new { f = folio }, tx);
+        var exists = await db.ExecuteScalarAsync<int>("SELECT COUNT(*) FROM ordenes WHERE folio=@f;", new { f = folio }, tx);
         if (exists > 0) return await NuevoFolioAsync(db, tx);
         return folio;
     }
 
-    // Garantiza una transición (desde/hasta) en el proceso;
-    // si no existe, la crea con código SET-{desde}->{hasta}
-    private static async Task<long> AsegurarTransicionAsync(
-        IDbConnection db, IDbTransaction tx,
-        long procesoId, long estadoDesdeId, long estadoHastaId)
+    private static async Task<long> AsegurarTransicionAsync(IDbConnection db, IDbTransaction tx, long procesoId, long estadoDesdeId, long estadoHastaId)
     {
         var tr = await db.QueryFirstOrDefaultAsync<long?>(@"
             SELECT id FROM transiciones
@@ -448,14 +391,7 @@ public static class OrdersEndpoints
         return id;
     }
 
-    /// <summary>
-    /// Copia personalizaciones del carrito al ítem de orden.
-    /// Si no hay personalizaciones para el carrito_item real, intenta con un draftId (borrador de localStorage).
-    /// Asigna orden_items.personalizacion_ladoA_id / personalizacion_ladoB_id y devuelve esos IDs.
-    /// </summary>
-    private static async Task<(long? pidA, long? pidB)> CopiarPersonalizacionesAsync(
-        IDbConnection db, IDbTransaction tx,
-        long fromCarritoItemId, long toOrdenItemId, long? fallbackDraftItemId = null)
+    private static async Task<(long? pidA, long? pidB)> CopiarPersonalizacionesAsync(IDbConnection db, IDbTransaction tx, long fromCarritoItemId, long toOrdenItemId, long? fallbackDraftItemId = null)
     {
         var pers = (await db.QueryAsync<(long id, string lado)>(@"
             SELECT id, lado
@@ -463,7 +399,6 @@ public static class OrdersEndpoints
             WHERE propietario_tipo='carrito_item' AND propietario_id=@cid",
             new { cid = fromCarritoItemId }, tx)).ToList();
 
-        // Fallback: si el front guardó con un draftId (ej. timestamp local)
         if (pers.Count == 0 && fallbackDraftItemId.HasValue)
         {
             pers = (await db.QueryAsync<(long id, string lado)>(@"
@@ -495,20 +430,14 @@ public static class OrdersEndpoints
                     new { nuevo = newPid, old = pid }, tx);
             }
 
-            // Asignar referencias a A/B en orden_items
             var lados = (await db.QueryAsync<(long id, string lado)>(@"
                 SELECT id, lado
                 FROM personalizaciones
                 WHERE propietario_tipo='orden_item' AND propietario_id=@oi;",
                 new { oi = toOrdenItemId }, tx)).ToList();
 
-            long? pidA = lados.Where(x => string.Equals(x.lado, "A", StringComparison.OrdinalIgnoreCase))
-                              .Select(x => (long?)x.id)
-                              .FirstOrDefault();
-
-            long? pidB = lados.Where(x => string.Equals(x.lado, "B", StringComparison.OrdinalIgnoreCase))
-                              .Select(x => (long?)x.id)
-                              .FirstOrDefault();
+            long? pidA = lados.Where(x => string.Equals(x.lado, "A", StringComparison.OrdinalIgnoreCase)).Select(x => (long?)x.id).FirstOrDefault();
+            long? pidB = lados.Where(x => string.Equals(x.lado, "B", StringComparison.OrdinalIgnoreCase)).Select(x => (long?)x.id).FirstOrDefault();
 
             await db.ExecuteAsync(@"
                 UPDATE orden_items
@@ -520,18 +449,10 @@ public static class OrdersEndpoints
             return (pidA, pidB);
         }
 
-        // No hubo personalizaciones
         return (null, null);
     }
 
-    /// <summary>
-    /// Selecciona el archivo_id de la capa FOTO "top" para una personalización dada
-    /// y hace UPSERT en orden_imagenes (por lado).
-    /// Además, marca el archivo como propietario de la orden.
-    /// </summary>
-    private static async Task UpsertOrdenImagenAsync(
-        IDbConnection db, IDbTransaction tx,
-        long ordenId, long personalizacionId, char lado)
+    private static async Task UpsertOrdenImagenAsync(IDbConnection db, IDbTransaction tx, long ordenId, long personalizacionId, char lado)
     {
         var archivoId = await db.ExecuteScalarAsync<long?>(@"
             SELECT pc.archivo_id
@@ -545,7 +466,6 @@ public static class OrdersEndpoints
 
         if (!archivoId.HasValue) return;
 
-        // UPSERT en orden_imagenes
         await db.ExecuteAsync(@"
             INSERT INTO orden_imagenes (orden_id, archivo_id, lado)
             VALUES (@o, @a, @lado)
@@ -554,7 +474,6 @@ public static class OrdersEndpoints
               creado_en  = CURRENT_TIMESTAMP;",
             new { o = ordenId, a = archivoId.Value, lado = (lado == 'B' ? "B" : "A") }, tx);
 
-        // (Opcional) actualizar propiedad del archivo hacia la orden
         await db.ExecuteAsync(@"
             UPDATE archivos
             SET propietario_tipo='orden', propietario_id=@o

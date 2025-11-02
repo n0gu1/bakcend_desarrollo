@@ -161,6 +161,7 @@ namespace BaseUsuarios.Api
             app.MapSimpleB64Endpoints();
             app.MapSupervisorEndpoints();
             app.MapAuthLoginWithRoleEndpoints();
+            app.MapOperatorEndpoints();
 
 
 
