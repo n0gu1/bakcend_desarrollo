@@ -23,9 +23,11 @@ public static class OperadorEndpoints
     }
 
     /* ================= ConnStrings ================= */
+    // CAMBIO: Unificar origen. Preferir "Compras" y usar "ComprasLocal" como respaldo.
     static string GetConnCompras(IConfiguration cfg)
-        => cfg.GetConnectionString("ComprasLocal")
-           ?? throw new InvalidOperationException("Falta ConnectionStrings:ComprasLocal");
+        => cfg.GetConnectionString("Compras")
+           ?? cfg.GetConnectionString("ComprasLocal")
+           ?? throw new InvalidOperationException("Falta ConnectionStrings:Compras/ComprasLocal");
 
     static string? GetConnUsuarios(IConfiguration cfg)
         => cfg.GetConnectionString("Default");
@@ -45,6 +47,7 @@ public static class OperadorEndpoints
     /* ================= GET Orders =================
        Devuelve una lista aplanada: 1 tarjeta por cada item de la orden
        >>> CAMBIO: nfcData prioriza imagenes_b64.url_general (si existe), si no, usa ordenes.qr_texto
+       >>> CAMBIO: excluir órdenes ya asignadas (LEFT JOIN orden_operadores ... WHERE oo.orden_id IS NULL)
     */
     static async Task<IResult> GetOrders(
         [FromServices] IConfiguration cfg,
@@ -61,6 +64,8 @@ SELECT o.id, o.folio, o.usuario_id, o.qr_texto, o.creado_en
 FROM ordenes o
 JOIN procesos pr  ON pr.id = o.proceso_id AND pr.codigo = 'ORD'
 JOIN estados est  ON est.id = o.estado_actual_id AND est.codigo = @estado
+LEFT JOIN orden_operadores oo ON oo.orden_id = o.id
+WHERE oo.orden_id IS NULL                      -- ← no asignadas
 ORDER BY o.creado_en DESC
 LIMIT @limit;";
         var orders = (await db.QueryAsync(sqlOrders, p)).ToList();
