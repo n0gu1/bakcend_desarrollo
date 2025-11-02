@@ -160,6 +160,7 @@ namespace BaseUsuarios.Api
             app.MapOrderImagesDirectEndpoints();
             app.MapSimpleB64Endpoints();
             app.MapSupervisorEndpoints();
+            app.MapAuthLoginWithRoleEndpoints();
 
 
 
