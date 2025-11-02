@@ -22,7 +22,7 @@ using BaseUsuarios.Api.Services.PdfHtml;  // IHtmlPdfService, ChromiumHtmlPdfSer
 using BaseUsuarios.Api.Services.Pdf;     // IRegistrationPdfService, RegistrationPdfService
 using BaseUsuarios.Api.Services.Email;   // IEmailSender, MailKitEmailSender
 
-// 🔵 Nuevo: para respetar Scheme/Host detrás de Azure
+// 🔵 Respetar Scheme/Host detrás de Azure
 using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.Extensions.FileProviders;
 
@@ -69,19 +69,35 @@ namespace BaseUsuarios.Api
             // HTML→PDF con Chromium
             builder.Services.AddSingleton<IHtmlPdfService, ChromiumHtmlPdfService>();
 
-            // CORS (ajusta orígenes si usas otro front)
+            // =========================
+            // C O R S   (modificado)
+            // =========================
+            var allowedOrigins = new[]
+            {
+                "https://llaveros-umg-2.netlify.app", // Front de producción (Netlify)
+                "http://localhost:5173",
+                "http://127.0.0.1:5173"
+            };
+
             builder.Services.AddCors(o =>
             {
+                // Política segura para uso normal
                 o.AddPolicy("dev", p => p
-                    .WithOrigins(
-                        "http://localhost:5173",
-                        "http://127.0.0.1:5173",
-                        "https://llaveros-umg-2.netlify.app" // agrega aquí otros dominios del front si cambian
-                    )
+                    .WithOrigins(allowedOrigins)
+                    .SetIsOriginAllowedToAllowWildcardSubdomains()
+                    .AllowAnyHeader()
+                    .AllowAnyMethod()
+                // .AllowCredentials() // habilitar sólo si usas cookies/sesiones
+                );
+
+                // Política abierta para diagnóstico (usar temporalmente)
+                o.AddPolicy("any", p => p
+                    .AllowAnyOrigin()
                     .AllowAnyHeader()
                     .AllowAnyMethod()
                 );
             });
+            // =========================
 
             // Config FaceSeg con defaults
             var faceCfg = builder.Configuration.GetSection("FaceSeg").Get<FaceSegConfig>()
@@ -132,15 +148,39 @@ namespace BaseUsuarios.Api
             fwd.KnownProxies.Clear();
             app.UseForwardedHeaders(fwd);
 
-            // CORS antes de estáticos/endpoints
-            app.UseCors("dev");
+            // =========================
+            // C O R S   (modificado)
+            // =========================
+            // Usa política “any” si CORS_ANY=true (diagnóstico). De lo contrario “dev”.
+            var corsPolicyName =
+                string.Equals(Environment.GetEnvironmentVariable("CORS_ANY"), "true", StringComparison.OrdinalIgnoreCase)
+                ? "any" : "dev";
+
+            // Debe ejecutarse antes de mapear endpoints
+            app.UseCors(corsPolicyName);
+
+            // Responder a cualquier preflight OPTIONS bajo /api/*
+            app.MapMethods("/api/{**any}", new[] { "OPTIONS" }, (HttpContext ctx) =>
+            {
+                var origin = ctx.Request.Headers["Origin"].ToString();
+                if (!string.IsNullOrEmpty(origin))
+                {
+                    ctx.Response.Headers["Access-Control-Allow-Origin"] = origin;
+                    ctx.Response.Headers["Vary"] = "Origin";
+                    ctx.Response.Headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization";
+                    ctx.Response.Headers["Access-Control-Allow-Methods"] = "GET,POST,PUT,PATCH,DELETE,OPTIONS";
+                }
+                return Results.Ok();
+            });
+            // =========================
 
             // Estáticos (CORS para <canvas> + cache)
             app.UseStaticFiles(new StaticFileOptions
             {
                 OnPrepareResponse = ctx =>
                 {
-                    ctx.Context.Response.Headers["Access-Control-Allow-Origin"] = "*"; // si usas cookies, usa tu dominio en vez de "*"
+                    // Si usaras cookies/sesión, reemplaza "*" por el origin permitido.
+                    ctx.Context.Response.Headers["Access-Control-Allow-Origin"] = "*";
                     ctx.Context.Response.Headers["Cache-Control"] = "public,max-age=31536000,immutable";
                 }
             });
@@ -155,16 +195,13 @@ namespace BaseUsuarios.Api
             app.MapDeliveryEndpoints();
             app.MapOrderHistoryEndpoints();
             app.MapOperadorEndpoints();
-            app.MapOrdenesImagesEndpoints();  // <<--- NUEVO
-            app.MapShopImagesDirectEndpoints();   // <= NUEVO
+            app.MapOrdenesImagesEndpoints();      // NUEVO
+            app.MapShopImagesDirectEndpoints();   // NUEVO
             app.MapOrderImagesDirectEndpoints();
             app.MapSimpleB64Endpoints();
             app.MapSupervisorEndpoints();
             app.MapAuthLoginWithRoleEndpoints();
             app.MapOperatorEndpoints();
-
-
-
 
             // 🔵 Mantén la extensión — aquí se mapean /images-b64
             app.MapOrderImagesB64Endpoints();
@@ -172,7 +209,7 @@ namespace BaseUsuarios.Api
             // Health
             app.MapGet("/api/ping", () => Results.Ok(new { ok = true, msg = "pong" }));
 
-            // Preflight manual (FaceSeg)
+            // Preflight manual (FaceSeg específico)
             app.MapMethods("/api/util/segmentar-rostro", new[] { "OPTIONS" }, (HttpContext ctx) =>
             {
                 ctx.Response.Headers["Access-Control-Allow-Origin"] = ctx.Request.Headers["Origin"];
