@@ -101,6 +101,8 @@ namespace BaseUsuarios.Api
                 c.Timeout = TimeSpan.FromSeconds(7);
             });
 
+            builder.Services.AddMemoryCache();
+
             var app = builder.Build();
 
             // Crear wwwroot/uploads (después de Build)
@@ -157,6 +159,7 @@ namespace BaseUsuarios.Api
             app.MapShopImagesDirectEndpoints();   // <= NUEVO
             app.MapOrderImagesDirectEndpoints();
             app.MapSimpleB64Endpoints();
+            app.MapSupervisorEndpoints();
 
 
 
