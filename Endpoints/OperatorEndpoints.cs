@@ -42,6 +42,9 @@ namespace BaseUsuarios.Api.Endpoints
                     await using var cn = new MySqlConnection(csCompras);
                     await cn.OpenAsync();
 
+                    // 🔧 Fuerza charset/collation de la sesión para que params y literales usen 0900
+                    await cn.ExecuteAsync("SET NAMES utf8mb4 COLLATE utf8mb4_0900_ai_ci;");
+
                     const string sql = @"
 SELECT  o.id,
         -- folio completo con fallback por si viene vacío/nulo
@@ -50,10 +53,15 @@ SELECT  o.id,
         o.creado_en
 FROM ordenes o
 JOIN estados e            ON e.id = o.estado_actual_id
-JOIN procesos pr          ON pr.id = o.proceso_id AND pr.codigo = 'ORD'
+JOIN procesos pr          ON pr.id = o.proceso_id
+                          AND pr.codigo COLLATE utf8mb4_0900_ai_ci = 'ORD' COLLATE utf8mb4_0900_ai_ci
 JOIN orden_operadores oo  ON oo.orden_id = o.id   -- <== SOLO asignadas
-WHERE (@estado IS NULL OR e.codigo = @estado)
-  AND (@operadorUsuarioId IS NULL OR oo.operador_usuario_id = @operadorUsuarioId)
+WHERE (
+    @estado IS NULL OR
+    e.codigo COLLATE utf8mb4_0900_ai_ci =
+      CAST(@estado AS CHAR CHARACTER SET utf8mb4) COLLATE utf8mb4_0900_ai_ci
+)
+AND (@operadorUsuarioId IS NULL OR oo.operador_usuario_id = @operadorUsuarioId)
 ORDER BY o.creado_en DESC
 LIMIT @limit;";
 
@@ -71,8 +79,7 @@ LIMIT @limit;";
                 }
             });
 
-            // ===== NUEVO =====
-            // GET /api/courier/orders-ready?limit=200
+            // ===== GET /api/courier/orders-ready?limit=200 =====
             // Trae TODAS las órdenes READY (sin filtrar por operador).
             app.MapGet("/api/courier/orders-ready", async (HttpContext ctx, IConfiguration cfg, ILoggerFactory lf) =>
             {
@@ -92,6 +99,9 @@ LIMIT @limit;";
                     await using var cn = new MySqlConnection(csCompras);
                     await cn.OpenAsync();
 
+                    // 🔧 Igual que arriba: fija charset/collation de sesión
+                    await cn.ExecuteAsync("SET NAMES utf8mb4 COLLATE utf8mb4_0900_ai_ci;");
+
                     const string sqlReady = @"
 SELECT
   o.id,
@@ -101,8 +111,10 @@ SELECT
   COALESCE(o.total,0) AS price,
   o.creado_en
 FROM ordenes o
-JOIN procesos pr ON pr.id = o.proceso_id AND pr.codigo = 'ORD'
-JOIN estados  es ON es.id = o.estado_actual_id AND es.codigo = 'READY'
+JOIN procesos pr ON pr.id = o.proceso_id
+                AND pr.codigo COLLATE utf8mb4_0900_ai_ci = 'ORD' COLLATE utf8mb4_0900_ai_ci
+JOIN estados  es ON es.id = o.estado_actual_id
+                AND es.codigo COLLATE utf8mb4_0900_ai_ci = 'READY' COLLATE utf8mb4_0900_ai_ci
 LEFT JOIN usuarios u ON u.id = o.usuario_id
 ORDER BY o.creado_en DESC
 LIMIT @limit;";
