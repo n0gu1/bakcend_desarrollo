@@ -202,8 +202,8 @@ namespace BaseUsuarios.Api
             app.MapSupervisorEndpoints();
             app.MapAuthLoginWithRoleEndpoints();
             app.MapOperatorEndpoints();
+            app.MapRepartidorEndpoints();
 
-            
             // 🔵 Mantén la extensión — aquí se mapean /images-b64
             app.MapOrderImagesB64Endpoints();
 
